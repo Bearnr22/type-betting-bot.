@@ -389,8 +389,193 @@ def build_app():
     t = parse_hhmm(storage["drop_time"]) or time(8,30)
     app.job_queue.run_daily(callback=daily_drop, time=t, name="daily_drop")
 
-    return app
+    return # =====================  THE RACING API COMMANDS  =====================
+# Drop-in bundle for: /courses, /races <course_id>, /horses <race_id>, /results <race_id>
+# Requires env vars in Railway: RACING_API_USER, RACING_API_PASS
 
+import os, requests, math
+from typing import Dict, Any, List
+
+try:
+    from telegram import Update
+    from telegram.ext import CommandHandler, ContextTypes
+except Exception:
+    # If your imports are already at top of file, this will be ignored.
+    pass
+
+# ---- Credentials (set in Railway Variables) ----
+RACING_API_USER = os.getenv("RACING_API_USER")
+RACING_API_PASS = os.getenv("RACING_API_PASS")
+
+def _auth_ok() -> bool:
+    return bool(RACING_API_USER and RACING_API_PASS)
+
+BASE_URL = "https://api.theracingapi.com"
+
+def _racing_get(path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """
+    Helper for GET calls to The Racing API with HTTP Basic auth.
+    Raises for non-200 so errors show in logs.
+    """
+    if not _auth_ok():
+        raise RuntimeError("Set RACING_API_USER and RACING_API_PASS")
+    url = f"{BASE_URL}{path}"
+    resp = requests.get(url, params=params or {}, auth=(RACING_API_USER, RACING_API_PASS), timeout=25)
+    resp.raise_for_status()
+    return resp.json()
+
+async def _reply_long(update: Update, text: str) -> None:
+    """
+    Telegram messages have a 4096 char limit. Send in chunks safely.
+    """
+    if not text:
+        await update.message.reply_text("No data.")
+        return
+    MAX = 3500
+    for i in range(0, len(text), MAX):
+        await update.message.reply_text(text[i:i+MAX])
+
+# -------------------- /courses --------------------
+async def courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    List all courses with their IDs.
+    Usage: /courses
+    """
+    try:
+        data = _racing_get("/v1/courses")
+    except Exception as e:
+        await update.message.reply_text(f"Error fetching courses: {e}")
+        return
+
+    items = data.get("courses") or data.get("data") or []
+    if not items:
+        await update.message.reply_text("No courses returned.")
+        return
+
+    # keep it tidy; cap to first 200 to avoid huge walls of text
+    items = items[:200]
+    lines: List[str] = []
+    for c in items:
+        cid = c.get("id") or c.get("course_id") or "?"
+        name = c.get("course") or c.get("name") or "Unknown"
+        country = c.get("country") or c.get("country_code") or ""
+        lines.append(f"• {name}{f' ({country})' if country else ''} — ID: {cid}")
+    await _reply_long(update, "\n".join(lines))
+
+# -------------------- /races <course_id> --------------------
+async def races(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    List today's races for a course.
+    Usage: /races <course_id>   e.g.  /races crs_13780
+    """
+    if not context.args:
+        await update.message.reply_text("Usage: /races <course_id>")
+        return
+
+    course_id = context.args[0]
+    try:
+        # Some APIs want date=today; others infer it. Try both.
+        data = _racing_get("/v1/races", params={"course": course_id, "date": "today"})
+        races_list = data.get("races") or data.get("data")
+        if not races_list:
+            data = _racing_get("/v1/races", params={"course": course_id})
+            races_list = data.get("races") or data.get("data")
+    except Exception as e:
+        await update.message.reply_text(f"Error fetching races: {e}")
+        return
+
+    if not races_list:
+        await update.message.reply_text("No races found for that course.")
+        return
+
+    lines = []
+    for r in races_list:
+        rid = r.get("id") or r.get("race_id") or "?"
+        name = r.get("name") or r.get("race") or "Race"
+        time_ = r.get("time") or r.get("off_time") or r.get("scheduled") or ""
+        cls = r.get("class") or r.get("grade") or ""
+        dist = r.get("distance") or ""
+        pieces = [p for p in [time_, name, f"ID: {rid}", cls and f"Class: {cls}", dist and f"Dist: {dist}"] if p]
+        lines.append(" — ".join(pieces))
+
+    await _reply_long(update, "\n".join(lines))
+
+# -------------------- /horses <race_id> --------------------
+async def horses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    List declared runners for a race with jockey/trainer when available.
+    Usage: /horses <race_id>
+    """
+    if not context.args:
+        await update.message.reply_text("Usage: /horses <race_id>")
+        return
+
+    race_id = context.args[0]
+    try:
+        data = _racing_get("/v1/horses", params={"race": race_id})
+    except Exception as e:
+        await update.message.reply_text(f"Error fetching horses: {e}")
+        return
+
+    horses_list = data.get("horses") or data.get("runners") or data.get("data") or []
+    if not horses_list:
+        await update.message.reply_text("No horses returned.")
+        return
+
+    lines = []
+    for h in horses_list:
+        name = h.get("name") or h.get("horse") or "?"
+        num = h.get("number") or h.get("cloth_number") or h.get("draw") or ""
+        jockey = h.get("jockey") or h.get("jockey_name") or ""
+        trainer = h.get("trainer") or h.get("trainer_name") or ""
+        rating = h.get("rating") or h.get("official_rating") or ""
+        parts = [p for p in [num and f"{num}.", name, jockey and f"— J: {jockey}", trainer and f"T: {trainer}", rating and f"OR: {rating}"] if p]
+        lines.append(" ".join(parts))
+
+    await _reply_long(update, "\n".join(lines))
+
+# -------------------- /results <race_id> --------------------
+async def results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Show results for a race (if available).
+    Usage: /results <race_id>
+    """
+    if not context.args:
+        await update.message.reply_text("Usage: /results <race_id>")
+        return
+
+    race_id = context.args[0]
+    try:
+        data = _racing_get("/v1/results", params={"race": race_id})
+    except Exception as e:
+        await update.message.reply_text(f"Error fetching results: {e}")
+        return
+
+    results_list = data.get("results") or data.get("placings") or data.get("data") or []
+    if not results_list:
+        await update.message.reply_text("No results yet.")
+        return
+
+    lines = []
+    for r in results_list:
+        pos = r.get("position") or r.get("pos") or "?"
+        horse = r.get("horse") or r.get("name") or "?"
+        sp = r.get("sp") or r.get("odds") or ""
+        lines.append(f"{pos}: {horse}{f' ({sp})' if sp else ''}")
+
+    await _reply_long(update, "\n".join(lines))
+
+def register_racing_handlers(app):
+    """
+    Call this once, after you create your Application:
+        app = ApplicationBuilder().token(BOT_TOKEN).build()
+        register_racing_handlers(app)
+    """
+    app.add_handler(CommandHandler("courses", courses))
+    app.add_handler(CommandHandler("races", races))
+    app.add_handler(CommandHandler("horses", horses))
+    app.add_handler(CommandHandler("results", results))
+# =====================  END / THE RACING API BUNDLE  =====================
 if __name__ == "__main__":
     app = build_app()
     app.run_polling()
