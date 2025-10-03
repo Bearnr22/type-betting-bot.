@@ -326,8 +326,11 @@ async def daily_drop(context: ContextTypes.DEFAULT_TYPE):
             # if delivery fails (e.g., blocked bot), drop the subscriber
             storage["subscribers"].discard(chat_id)
 
+from telegram.ext import JobQueue
+
 def build_app():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    job_queue = JobQueue()
+    app = ApplicationBuilder().token(BOT_TOKEN).job_queue(job_queue).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("settime", cmd_settime))
@@ -346,6 +349,7 @@ def build_app():
     # schedule initial daily drop at default time
     t = parse_hhmm(storage["drop_time"]) or time(8,30)
     app.job_queue.run_daily(callback=daily_drop, time=t, name="daily_drop")
+
     return app
 
 if __name__ == "__main__":
