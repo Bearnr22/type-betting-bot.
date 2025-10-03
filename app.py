@@ -10,7 +10,22 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
     ContextTypes, filters
 )
+# ----- Racing API helper -----
+RACING_API_BASE = os.getenv("RACING_API_BASE", "https://api.theracingapi.com")
+RACING_API_USER = os.getenv("RACING_API_USER")
+RACING_API_PASS = os.getenv("RACING_API_PASS")
 
+def api_get(path: str, params: dict | None = None):
+    """
+    GET {RACING_API_BASE}{path} with HTTP Basic Auth.
+    Returns parsed JSON or raises on error.
+    """
+    assert RACING_API_USER and RACING_API_PASS, "Set RACING_API_USER and RACING_API_PASS"
+    url = f"{RACING_API_BASE}{path}"
+    resp = requests.get(url, params=params, auth=(RACING_API_USER, RACING_API_PASS), timeout=20)
+    resp.raise_for_status()
+    return resp.json()
+# --------------------------------
 # ---------- ENV & GLOBAL STORAGE ----------
 TZ = os.getenv("TZ", "Europe/Dublin")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -289,6 +304,29 @@ async def cmd_horse_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(chunk)
 
 # ---------- DAILY DROP ----------
+async def courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ /courses  -> list racecourses from TheRacingAPI """
+    try:
+        data = api_get("/v1/courses")
+        # Some APIs return {"courses":[...]} others {"data":[...]} – support both:
+        items = data.get("courses", []) or data.get("data", []) or []
+        if not items:
+            return await update.message.reply_text("No courses found.")
+
+        # Keep message under Telegram limits
+        lines = []
+        for c in items[:20]:
+            cid = c.get("id") or c.get("course_id")
+            name = c.get("course") or c.get("name")
+            country = c.get("country", "")
+            if country:
+                lines.append(f"• {name} ({country}) — ID: {cid}")
+            else:
+                lines.append(f"• {name} — ID: {cid}")
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"Error fetching courses: {e}")
 async def daily_drop(context: ContextTypes.DEFAULT_TYPE):
     # For each subscriber: send football and (if exists) horse ranking
     ms = football_today_matches()
@@ -331,7 +369,8 @@ from telegram.ext import JobQueue
 def build_app():
     job_queue = JobQueue()
     app = ApplicationBuilder().token(BOT_TOKEN).job_queue(job_queue).build()
-
+    
+    app.add_handler(CommandHandler("courses", courses))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("settime", cmd_settime))
     app.add_handler(CommandHandler("football_addleague", cmd_football_addleague))
