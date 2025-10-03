@@ -369,6 +369,7 @@ from telegram.ext import JobQueue
 def build_app():
     job_queue = JobQueue()
     app = ApplicationBuilder().token(BOT_TOKEN).job_queue(job_queue).build()
+    register_racing_handlers(app)
     
     app.add_handler(CommandHandler("courses", courses))
     app.add_handler(CommandHandler("start", cmd_start))
